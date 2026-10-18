@@ -12,6 +12,7 @@ so the caller can tune thresholds without re-downloading.
   mad   mean |diff| of both images as 64x64 grayscale (0-255)
   corr  Pearson correlation of the same 64x64 arrays
   bmax  worst 8x8-block mean |diff| (catches a local change a global mean hides)
+  mad256 / bmax256 / p99_256  same at 256x256 (16px blocks), only when dist <= 12
 Idempotent: a shard whose result already exists is skipped.
 env: MEDIA_BLOB_READ_SAS, MEDIA_BLOB_WRITE_SAS
 """
@@ -62,19 +63,30 @@ def features(raw: bytes):
     bits = (px[:, :-1] > px[:, 1:]).flatten()
     dh = int("".join("1" if b else "0" for b in bits), 2)
     a64 = np.asarray(g.resize((64, 64), Image.LANCZOS), dtype=np.float32)
-    return w, h, dh, a64
+    a256 = np.asarray(g.resize((256, 256), Image.LANCZOS), dtype=np.uint8)
+    return w, h, dh, a64, a256
 
 
 def compare(fs, fc) -> dict:
-    ws, hs, ds, a = fs
-    wc, hc, dc, b = fc
+    ws, hs, ds, a, A = fs
+    wc, hc, dc, b, B = fc
     ra, rb = ws / hs, wc / hc
     d = np.abs(a - b)
     sa, sb = a.std(), b.std()
     corr = float(((a - a.mean()) * (b - b.mean())).mean() / (sa * sb)) if sa > 0 and sb > 0 else 0.0
     return {"dist": (ds ^ dc).bit_count(), "ar": round(abs(ra - rb) / max(ra, rb), 4),
             "mad": round(float(d.mean()), 3), "corr": round(corr, 5),
-            "bmax": round(float(d.reshape(8, 8, 8, 8).mean(axis=(1, 3)).max()), 3)}
+            "bmax": round(float(d.reshape(8, 8, 8, 8).mean(axis=(1, 3)).max()), 3),
+            **_fine(A, B, ds ^ dc)}
+
+
+def _fine(A, B, x):
+    """256x256 check (only for dhash candidates): mean |diff|, worst 16x16-px block, 99th pct pixel."""
+    if x.bit_count() > 12:
+        return {}
+    D = np.abs(A.astype(np.int16) - B.astype(np.int16)).astype(np.float32)
+    return {"mad256": round(float(D.mean()), 3), "bmax256": round(float(D.reshape(16, 16, 16, 16).mean(axis=(1, 3)).max()), 3),
+            "p99_256": float(np.percentile(D, 99))}
 
 
 def main() -> None:
