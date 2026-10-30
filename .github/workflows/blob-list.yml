@@ -1,0 +1,41 @@
+name: blob-list
+
+# Read-only: count files per outlet folder under the given run prefixes of scraper-media
+# (tools/blob_list_counts.py). One CSV artifact per slice. Manual dispatch only.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:    { required: true,  type: string, description: "comma-separated top-level run folders" }
+      slices:  { required: false, type: string, default: "8" }
+      workers: { required: false, type: string, default: "64" }
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+    steps:
+      - id: mk
+        run: python3 -c 'import json; print("matrix="+json.dumps(list(range(int("${{ inputs.slices }}")))))' >> "$GITHUB_OUTPUT"
+
+  list:
+    needs: plan
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: List this slice
+        env:
+          AZURE_STORAGE_SAS: ${{ secrets.MEDIA_BLOB_READ_SAS }}
+        run: |
+          python3 tools/blob_list_counts.py --runs "${{ inputs.runs }}" --slice ${{ matrix.slice }} \
+            --slices ${{ inputs.slices }} --workers ${{ inputs.workers }} --out counts_${{ matrix.slice }}.csv.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: counts_${{ matrix.slice }}
+          path: counts_${{ matrix.slice }}.csv.gz
+          retention-days: 7
