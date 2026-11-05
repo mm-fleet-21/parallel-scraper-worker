@@ -15,6 +15,9 @@ visible in SQL:  select count(*) filter (where done), count(*) from kw_photo_job
 Env (from micromarket-py/.env): SUPABASE_DEDUP_URL, SUPABASE_DEDUP_SERVICE_KEY,
 AZURE_MEDIA_CONTAINER_URL, AZURE_STORAGE_SAS.
 
+source_path (migration 160, 6 Nov 2026): a full scraper-media path, e.g. the 17 Oct photo read's prepared copy
+  llm-skeletons/kwality/<run>/<place_id>/NN_0.jpg -- the last fallback when the outlet has no scraper close-up.
+
 Usage:  python3 scripts/ops/kw_photo_thumbs.py [--workers 12] [--limit N] [--retry-errors]
         [--seq-from A --seq-to B]   one slice of the list (A < seq <= B), so fleet runners can split it
 
@@ -51,7 +54,7 @@ def log(msg: str) -> None:
 
 def next_batch(after_seq: int, size: int, retry_errors: bool, seq_to: int = 0) -> list[dict]:
     params = {
-        "select": "seq,place_id,source_run,image_index,alt_run,google_url",
+        "select": "seq,place_id,source_run,image_index,alt_run,google_url,source_path",
         "seq": f"gt.{after_seq}",
         "order": "seq.asc",
         "limit": str(size),
@@ -70,7 +73,8 @@ def blob_url(run: str, pid: str, idx: int, ext: str) -> str:
     return f"{AZ_BASE}/{run}/{pid}/{pid}_{idx}.{ext}?{AZ_SAS}"
 
 
-def fetch_source(run: str, pid: str, idx: int, alt_run: str | None = None, google_url: str | None = None) -> bytes:
+def fetch_source(run: str, pid: str, idx: int, alt_run: str | None = None, google_url: str | None = None,
+                 source_path: str | None = None) -> bytes:
     """The chosen close-up: jpg first, png second, then whichever numbered
     close-up exists (the chosen index can be missing when a download failed).
     Then the same under the STATE folder — 16,290 outlets sit in regions whose
@@ -100,6 +104,10 @@ def fetch_source(run: str, pid: str, idx: int, alt_run: str | None = None, googl
             r = session.get(f"{AZ_BASE}/{names[0]}?{AZ_SAS}", timeout=30)
             if r.status_code == 200 and r.content:
                 return r.content
+    if source_path:
+        r = session.get(f"{AZ_BASE}/{source_path.lstrip('/')}?{AZ_SAS}", timeout=30)
+        if r.status_code == 200 and r.content:
+            return r.content
     raise FileNotFoundError("no close-up in blob")
 
 
@@ -146,7 +154,7 @@ def do_one(job: dict) -> dict:
     pid, run, idx, seq = job["place_id"], job["source_run"], int(job["image_index"] or 1), job["seq"]
     base = {"place_id": pid, "seq": seq, "source_run": run, "image_index": idx, "city": job.get("city")}
     try:
-        raw = fetch_source(run, pid, idx, job.get("alt_run"), job.get("google_url"))
+        raw = fetch_source(run, pid, idx, job.get("alt_run"), job.get("google_url"), job.get("source_path"))
         data = thumbnail(raw)
         upload(pid, data)
         return {**base, "done": True, "error": None, "bytes": len(data), "done_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
